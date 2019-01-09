@@ -1,0 +1,9 @@
+{
+	"Enable": [
+		"goimports",
+		"gosimple",
+		"staticcheck"
+	],
+	"Cyclo": 15,
+	"EnableAll": true
+}
