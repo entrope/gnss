@@ -56,7 +56,8 @@ type ObservationRecord struct {
 
 	// Month, Day, Hour and Minute indicate the time of the record in a
 	// GNSS time scale.  (The RINEX header indicates which GNSS time
-	// scale is used for this)
+	// scale is used for this.  In particular, GLONASS time includes
+	// leap seconds, but GPS and Galileo times do not.)
 	Month, Day, Hour, Minute byte
 
 	// EpochFlag is a value from 0 to 6 that indicate any unusual event
@@ -678,6 +679,7 @@ func (or *ObsReader) handleSysNumObsTypes(value string) error {
 }
 
 // Time converts the date and time in rec to a standard Go time.
+// This only works for time systems that (like Go) ignore leap seconds.
 func (rec ObservationRecord) Time() time.Time {
 	fSec := float64(rec.Second)
 	iSec := math.Floor(fSec)
