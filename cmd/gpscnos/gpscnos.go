@@ -23,6 +23,7 @@ import (
 	"golang.org/x/image/math/fixed"
 )
 
+// SignalDay holds one day worth of statistics for a single signal.
 type SignalDay struct {
 	// snr is a 2-D histogram of SNR values.  The first index is time,
 	// in two-minute units.  The second index is scaled SNR, as
@@ -30,6 +31,7 @@ type SignalDay struct {
 	snr [720][80]byte
 }
 
+// SiteDay holds the statistics for one day at one site.
 type SiteDay struct {
 	// Basename contains the four-character site code, followed by the
 	// four-digit Julian day and hour indicator.
@@ -47,10 +49,8 @@ type SiteDay struct {
 	// Day is the (one-based, within the month) day of the data.
 	Day int
 
-	// Sats maps from a satellite-signal identifier to SNR values for it.
-	// The key's first byte is the frequency number ('1', '2', '5') and
-	// the other three bytes are a RINEX satellite identifier.
-	Sats map[[4]byte]*SignalDay
+	// Sats maps a gpsIdx value to the SignalDay structure for that SV.
+	Sats []*SignalDay
 }
 
 var (
@@ -61,7 +61,13 @@ var (
 	suffix   *regexp.Regexp
 	gpsIdx   = [...]int{-1, 0, 1, 2, -1, 3, 4, 5, 6, 7, 8, 9, 10, 11,
 		12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
-		28, 29, 30, 31}
+		28, 29, 30}
+	satNames = []string{
+		"G01", "G02", "G03", "G05", "G06", "G07", "G08", "G09",
+		"G10", "G11", "G12", "G13", "G14", "G15", "G16", "G17",
+		"G18", "G19", "G20", "G21", "G22", "G23", "G24", "G25",
+		"G26", "G27", "G28", "G29", "G30", "G31", "G32",
+	}
 )
 
 func rgb(r, g, b byte) color.NRGBA {
@@ -103,7 +109,7 @@ func loadDay(fname string) (*SiteDay, error) {
 	res := &SiteDay{
 		Basename: basename,
 		Interval: 0,
-		Sats:     make(map[[4]byte]*SignalDay, 64),
+		Sats:     make([]*SignalDay, 31),
 	}
 	last := -1
 	or := &rinex.ObsReader{}
@@ -138,25 +144,27 @@ func loadDay(fname string) (*SiteDay, error) {
 		last = seconds
 		horiz := seconds / 120
 		for _, sv := range rec.Sat {
-			if sv.PRN[0] != 'G' && sv.PRN[0] != 'E' {
+			if sv.PRN[0] != 'G' {
 				continue
 			}
-			var key [4]byte
-			copy(key[1:4], sv.PRN[:])
+			prn := (sv.PRN[1]-'0')*10 + sv.PRN[2] - '0'
+			idx := gpsIdx[prn]
+			if idx < 0 {
+				continue
+			}
 			obsCodes := or.Observations[sv.PRN[0]]
 			if obsCodes == nil {
 				obsCodes = or.Observations[' ']
 			}
 			for j, o := range sv.Obs {
 				obsCode := obsCodes[j]
-				if obsCode[0] != 'S' || o.Value == 0 {
+				if obsCode[0] != 'S' || obsCode[1] != '1' {
 					continue
 				}
-				key[0] = obsCode[1]
-				s := res.Sats[key]
+				s := res.Sats[idx]
 				if s == nil {
 					s = new(SignalDay)
-					res.Sats[key] = s
+					res.Sats[idx] = s
 				}
 				y := math.Round(2 * (o.Value - 20))
 				y = math.Max(0, math.Min(float64(len(s.snr[0])-1), y))
@@ -214,7 +222,6 @@ func drawGrid(img *image.NRGBA) {
 			img.SetNRGBA(x, y, grey)
 		}
 	}
-	// TODO: add labels for the major divisions
 	for x := 0; x < width; x++ {
 		for y := 20; y < height; y += 20 {
 			img.SetNRGBA(x, height-1-y, grey)
@@ -239,24 +246,21 @@ func plotDay(siteDay *SiteDay) error {
 	var img [3]*image.NRGBA
 	width := 720
 	height := 480
+	date := fmt.Sprintf("%04d-%02d-%02d", siteDay.Year, siteDay.Month, siteDay.Day)
 	for i := range img {
 		img[i] = image.NewNRGBA(image.Rect(0, 0, width, height))
 		drawGrid(img[i])
+		addLabel(img[i], 645, 14, date, rgb(0, 0, 0))
 	}
 
-	for k, v := range siteDay.Sats {
-		if k[0] != link || k[1] != 'G' {
-			continue
-		}
-		svid := (k[2]-'0')*10 + k[3] - '0'
-		idx := gpsIdx[svid]
-		if idx < 0 {
+	for idx, v := range siteDay.Sats {
+		if v == nil {
 			continue
 		}
 		i, j := idx/11, idx%11
 		ofs := 40 * j
 		c := palette[j]
-		addLabel(img[i], 2, height-41-ofs, string(k[1:]), c)
+		addLabel(img[i], 2, height-41-ofs, satNames[idx], c)
 		for x := range v.snr {
 			for y, h := range v.snr[x] {
 				if h == 0 {
