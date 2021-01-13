@@ -13,7 +13,6 @@ import (
 )
 
 var nerrors int
-var md5File *os.File
 var failedToOpen = make([]string, 0, 32)
 var fetchedShort = make([]string, 0, 128)
 var fetchedLong = make([]string, 0, 32)
@@ -50,7 +49,7 @@ func openLocal(localfile string) *os.File {
 	return out
 }
 
-func fetch(cors *ftp.ServerConn, file, localfile, repname, failname string) bool {
+func fetch(cors *ftp.ServerConn, file, localfile, name string) bool {
 	var out *os.File
 	var err error
 
@@ -58,26 +57,18 @@ func fetch(cors *ftp.ServerConn, file, localfile, repname, failname string) bool
 		if out = openLocal(localfile); out == nil {
 			return false
 		}
-	} else if strings.HasSuffix(file, ".md5") {
-		out = md5File
 	} else {
 		log.Fatalln("Don't know what to do with fetch of", file)
 	}
 
 	in, err := cors.Retr(file)
 	if err != nil {
-		if out != nil && out != md5File {
+		if out != nil {
 			out.Close()
 		}
 		os.Remove(localfile)
 		if strings.Contains(err.Error(), "550 Failed to open file") {
-			if failname == "" {
-				log.Printf("Unable to RETR %s: %s", file, err.Error())
-			} else if strings.HasSuffix(file, ".md5") {
-				failedToOpen = append(failedToOpen, failname+".md5")
-			} else {
-				failedToOpen = append(failedToOpen, failname)
-			}
+			failedToOpen = append(failedToOpen, name)
 		} else if err.Error() == "i/o timeout" { // an internal/poll.TimeoutError
 			log.Fatalln(" ... bailing out")
 		} else {
@@ -91,12 +82,12 @@ func fetch(cors *ftp.ServerConn, file, localfile, repname, failname string) bool
 	if _, err := io.Copy(out, in); err != nil {
 		report("Failed to RETR %s into %s: %s", file, localfile, err.Error())
 		os.Remove(localfile)
-	} else if len(repname) == 4 {
-		fetchedShort = append(fetchedShort, repname)
-	} else if repname != "" {
-		fetchedLong = append(fetchedLong, repname)
+	} else if len(name) == 4 {
+		fetchedShort = append(fetchedShort, name)
+	} else {
+		fetchedLong = append(fetchedLong, name)
 	} // else don't report it
-	if out != nil && out != md5File {
+	if out != nil {
 		out.Close()
 	}
 
@@ -119,23 +110,15 @@ func fetchDay(cors *ftp.ServerConn, spath, year, dnum string) {
 		return
 	}
 
-	md5File, err = os.OpenFile(localdir+"/md5sums", os.O_WRONLY|os.O_CREATE, 0666)
-	if err != nil {
-		report("Unable to open %s/md5sums: %s", localdir, err.Error())
-		return
-	}
-
 	dirname := fmt.Sprintf("%s/rinex/%s/%s", spath, year, dnum)
 	if err = cors.ChangeDir(dirname); err != nil {
 		report("Unable to CWD %s: %s", dirname, err.Error())
-		md5File.Close()
 		return
 	}
 
 	names, err := cors.NameList(".")
 	if err != nil {
 		report("Unable to NLST %s: %s", dirname, err.Error())
-		md5File.Close()
 		return
 	}
 	// log.Printf("%s: %d entries", dirname, len(names))
@@ -143,16 +126,11 @@ func fetchDay(cors *ftp.ServerConn, spath, year, dnum string) {
 	for _, name := range names {
 		if len(name) == 4 {
 			filename := fmt.Sprintf("/%s%s0.%so.gz", name, dnum, year[2:4])
-			if fetch(cors, name+filename, localdir+filename, "", name) {
-				filename = filename + ".md5"
-				fetch(cors, name+filename, "", name, name)
-			}
+			fetch(cors, name+filename, localdir+filename, name)
 		} else if name != "sum_gz" {
-			fetch(cors, name, localdir+"/"+name, name, name)
+			fetch(cors, name, localdir+"/"+name, name)
 		}
 	}
-
-	md5File.Close()
 
 	if len(failedToOpen) > 0 {
 		log.Printf("%s failed to open: %s", localdir,
