@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -21,7 +22,7 @@ func report(format string, a ...interface{}) {
 	log.Printf(format, a...)
 	nerrors++
 	if nerrors > 9 {
-		log.Fatalln(" ... bailing out")
+		panic(errors.New("too many errors"))
 	}
 }
 
@@ -70,7 +71,7 @@ func fetch(cors *ftp.ServerConn, file, localfile, name string) bool {
 		if strings.Contains(err.Error(), "550 Failed to open file") {
 			failedToOpen = append(failedToOpen, name)
 		} else if err.Error() == "i/o timeout" { // an internal/poll.TimeoutError
-			log.Fatalln(" ... bailing out")
+			panic(err)
 		} else {
 			report("Unable to RETR %s: %s", file, err.Error())
 		}
@@ -122,6 +123,26 @@ func fetchDay(cors *ftp.ServerConn, spath, year, dnum string) {
 		return
 	}
 	// log.Printf("%s: %d entries", dirname, len(names))
+	defer func() {
+		if len(failedToOpen) > 0 {
+			log.Printf("%s failed to open: %s", localdir,
+				strings.Join(failedToOpen, " "))
+			failedToOpen = failedToOpen[:0]
+		}
+		var reportText string
+		if len(fetchedShort) > 0 {
+			reportText = reportText + " " + strings.Join(fetchedShort, " ")
+			fetchedShort = fetchedShort[:0]
+		}
+		if len(fetchedLong) > 0 {
+			reportText = reportText + " " + strings.Join(fetchedLong, " ")
+			fetchedLong = fetchedLong[:0]
+		}
+		if reportText == "" {
+			reportText = " All up to date"
+		}
+		log.Printf("%s fetched: %s", localdir, reportText[1:])
+	}()
 
 	for _, name := range names {
 		if len(name) == 4 {
@@ -132,24 +153,6 @@ func fetchDay(cors *ftp.ServerConn, spath, year, dnum string) {
 		}
 	}
 
-	if len(failedToOpen) > 0 {
-		log.Printf("%s failed to open: %s", localdir,
-			strings.Join(failedToOpen, " "))
-		failedToOpen = failedToOpen[:0]
-	}
-	var reportText string
-	if len(fetchedShort) > 0 {
-		reportText = reportText + " " + strings.Join(fetchedShort, " ")
-		fetchedShort = fetchedShort[:0]
-	}
-	if len(fetchedLong) > 0 {
-		reportText = reportText + " " + strings.Join(fetchedLong, " ")
-		fetchedLong = fetchedLong[:0]
-	}
-	if reportText == "" {
-		reportText = " All up to date"
-	}
-	log.Printf("%s fetched: %s", localdir, reportText[1:])
 }
 
 func main() {
@@ -188,6 +191,12 @@ func main() {
 	if err := cors.Login(user, password); err != nil {
 		log.Fatalln("Unable to log in to FTP server:", err)
 	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			log.Fatalln(r)
+		}
+	}()
 
 	// Fetch files for each specified day.
 	nerrors = 0
