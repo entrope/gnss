@@ -50,7 +50,7 @@ func openLocal(localfile string) *os.File {
 	return out
 }
 
-func fetch(cors *ftp.ServerConn, file, localfile, name string) bool {
+func fetch(cors *ftp.ServerConn, relPath, localfile, name string) bool {
 	var out *os.File
 	var err error
 
@@ -58,22 +58,22 @@ func fetch(cors *ftp.ServerConn, file, localfile, name string) bool {
 		if out = openLocal(localfile); out == nil {
 			return false
 		}
+		defer func() {
+			out.Close()
+		}()
 	} else {
-		log.Fatalln("Don't know what to do with fetch of", file)
+		log.Fatalln("Don't know what to do with fetch of", relPath)
 	}
 
-	in, err := cors.Retr(file)
+	in, err := cors.Retr(relPath)
 	if err != nil {
-		if out != nil {
-			out.Close()
-		}
 		os.Remove(localfile)
 		if strings.Contains(err.Error(), "550 Failed to open file") {
 			failedToOpen = append(failedToOpen, name)
 		} else if err.Error() == "i/o timeout" { // an internal/poll.TimeoutError
 			panic(err)
 		} else {
-			report("Unable to RETR %s: %s", file, err.Error())
+			report("Unable to RETR %s: %s", relPath, err.Error())
 		}
 		return false
 	}
@@ -81,15 +81,9 @@ func fetch(cors *ftp.ServerConn, file, localfile, name string) bool {
 
 	in.SetDeadline(time.Now().Add(480 * time.Second))
 	if _, err := io.Copy(out, in); err != nil {
-		report("Failed to RETR %s into %s: %s", file, localfile, err.Error())
+		report("Failed to RETR %s into %s: %s", relPath, localfile, err.Error())
 		os.Remove(localfile)
-	} else if len(name) == 4 {
-		fetchedShort = append(fetchedShort, name)
-	} else {
-		fetchedLong = append(fetchedLong, name)
-	} // else don't report it
-	if out != nil {
-		out.Close()
+		return false
 	}
 
 	return true
@@ -123,6 +117,7 @@ func fetchDay(cors *ftp.ServerConn, spath, year, dnum string) {
 		return
 	}
 	// log.Printf("%s: %d entries", dirname, len(names))
+
 	defer func() {
 		if len(failedToOpen) > 0 {
 			log.Printf("%s failed to open: %s", localdir,
@@ -147,12 +142,15 @@ func fetchDay(cors *ftp.ServerConn, spath, year, dnum string) {
 	for _, name := range names {
 		if len(name) == 4 {
 			filename := fmt.Sprintf("/%s%s0.%so.gz", name, dnum, year[2:4])
-			fetch(cors, name+filename, localdir+filename, name)
+			if fetch(cors, name+filename, localdir+filename, name) {
+				fetchedShort = append(fetchedShort, name)
+			}
 		} else if name != "sum_gz" {
-			fetch(cors, name, localdir+"/"+name, name)
+			if fetch(cors, name, localdir+"/"+name, name) {
+				fetchedLong = append(fetchedLong, name)
+			}
 		}
 	}
-
 }
 
 func main() {
