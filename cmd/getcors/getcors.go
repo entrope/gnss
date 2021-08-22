@@ -1,16 +1,18 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
 	"time"
-
-	"github.com/jlaffaye/ftp"
 )
 
 var nerrors int
@@ -50,9 +52,11 @@ func openLocal(localfile string) *os.File {
 	return out
 }
 
-func fetch(cors *ftp.ServerConn, relPath, localfile, name string) bool {
+func fetch(client *http.Client, url, localfile, name string) bool {
 	var out *os.File
 	var err error
+	var req *http.Request
+	var resp *http.Response
 
 	if localfile != "" {
 		if out = openLocal(localfile); out == nil {
@@ -62,26 +66,31 @@ func fetch(cors *ftp.ServerConn, relPath, localfile, name string) bool {
 			out.Close()
 		}()
 	} else {
-		log.Fatalln("Don't know what to do with fetch of", relPath)
+		log.Fatalln("Don't know what to do with fetch of", url)
 	}
 
-	in, err := cors.Retr(relPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 480*time.Second)
+	req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
+	resp, err = client.Do(req)
 	if err != nil {
+		cancel()
 		os.Remove(localfile)
 		if strings.Contains(err.Error(), "550 Failed to open file") {
 			failedToOpen = append(failedToOpen, name)
 		} else if err.Error() == "i/o timeout" { // an internal/poll.TimeoutError
 			panic(err)
 		} else {
-			report("Unable to RETR %s: %s", relPath, err.Error())
+			report("Unable to RETR %s: %s", url, err.Error())
 		}
 		return false
 	}
-	defer in.Close()
+	defer func() {
+		resp.Body.Close()
+		cancel()
+	}()
 
-	in.SetDeadline(time.Now().Add(480 * time.Second))
-	if _, err := io.Copy(out, in); err != nil {
-		report("Failed to RETR %s into %s: %s", relPath, localfile, err.Error())
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		report("Failed to GET %s into %s: %s", url, localfile, err.Error())
 		os.Remove(localfile)
 		return false
 	}
@@ -96,7 +105,51 @@ func getenv(name, defaultValue string) string {
 	return defaultValue
 }
 
-func fetchDay(cors *ftp.ServerConn, spath, year, dnum string) {
+func getNameList(response *http.Response) []string {
+	body, err := ioutil.ReadAll(response.Body)
+	if err != nil {
+		report("Unable to ready body for %s: %s",
+			response.Request.URL.String(), err.Error())
+		return nil
+	}
+
+	res := make([]string, 0, 2048)
+	start := []byte("<a href=\"")
+	for len(body) > 0 {
+		// Find the text inside an <a href=\".*\" block.
+		idx := bytes.Index(body, start)
+		if idx < 0 {
+			break
+		}
+		body = body[idx+len(start):]
+		idx = bytes.IndexByte(body, '"')
+		if idx < 0 {
+			break
+		}
+		url := body[:idx]
+		body = body[idx+1:]
+
+		// Filter urls: allow ????/, or *.gz, ignore sum_gz/ and \?C=* and /*.
+		if idx == 5 && url[4] == '/' { // "abcd/" becomes "abcd"
+			res = append(res, string(url[:4]))
+		} else if idx > 4 && 0 == bytes.Compare(url[idx-3:], []byte(".gz")) { // keep "*.gz"
+			res = append(res, string(url))
+		} else if idx == 7 && 0 == bytes.Compare(url, []byte("sum_gz/")) {
+			// ignore
+		} else if idx > 3 && 0 == bytes.Compare(url[0:3], []byte("?C=")) {
+			// ignore
+		} else if idx > 0 && url[0] == '/' {
+			// ignore
+		} else {
+			log.Printf("Unexpected URL in directory listing: %s", url)
+		}
+	}
+
+	return res
+}
+
+func fetchDay(client *http.Client, url, year, dnum string) {
+	var resp *http.Response
 	var err error
 
 	localdir := fmt.Sprintf("%s/%s", year, dnum)
@@ -105,15 +158,14 @@ func fetchDay(cors *ftp.ServerConn, spath, year, dnum string) {
 		return
 	}
 
-	dirname := fmt.Sprintf("%s/rinex/%s/%s", spath, year, dnum)
-	if err = cors.ChangeDir(dirname); err != nil {
-		report("Unable to CWD %s: %s", dirname, err.Error())
+	dayURL := fmt.Sprintf("%s%s/%s/", url, year, dnum)
+	if resp, err = client.Get(dayURL); err != nil {
+		report("Unable to GET %s: %s", dayURL, err.Error())
 		return
 	}
 
-	names, err := cors.NameList(".")
-	if err != nil {
-		report("Unable to NLST %s: %s", dirname, err.Error())
+	names := getNameList(resp)
+	if names == nil || len(names) < 1 {
 		return
 	}
 	// log.Printf("%s: %d entries", dirname, len(names))
@@ -142,11 +194,11 @@ func fetchDay(cors *ftp.ServerConn, spath, year, dnum string) {
 	for _, name := range names {
 		if len(name) == 4 {
 			filename := fmt.Sprintf("/%s%s0.%so.gz", name, dnum, year[2:4])
-			if fetch(cors, name+filename, localdir+filename, name) {
+			if fetch(client, dayURL+name+filename, localdir+filename, name) {
 				fetchedShort = append(fetchedShort, name)
 			}
-		} else if name != "sum_gz" {
-			if fetch(cors, name, localdir+"/"+name, name) {
+		} else {
+			if fetch(client, dayURL+name, localdir+"/"+name, name) {
 				fetchedLong = append(fetchedLong, name)
 			}
 		}
@@ -158,15 +210,8 @@ func main() {
 		log.Fatalf("Usage: %s <year> <dnum> ...", os.Args[0])
 	}
 
-	// What is the FTP server name and path?
-	server := getenv("CORS_SERVER", "geodesy.noaa.gov:ftp")
-	spath := getenv("CORS_PATH", "/cors")
-	user := getenv("CORS_USER", "anonymous")
-	password := getenv("CORS_PASS", "")
-	if password == "" {
-		fmt.Println("Please set the CORS_PASS environment variable to your email address")
-		os.Exit(1)
-	}
+	// What is the server URL?
+	url := getenv("CORS_SERVER", "https://geodesy.noaa.gov/corsdata/rinex/")
 
 	// Sanity-check arguments before we connect.
 	yearRE := regexp.MustCompile("^20[0-9][0-9]$")
@@ -181,15 +226,8 @@ func main() {
 		}
 	}
 
-	// Connect to the server.
-	cors, err := ftp.Dial(server)
-	if err != nil {
-		log.Fatalln("Cannot connect to server:", err)
-	}
-	if err := cors.Login(user, password); err != nil {
-		log.Fatalln("Unable to log in to FTP server:", err)
-	}
-
+	// Create our HTTP client object.
+	client := new(http.Client)
 	defer func() {
 		if r := recover(); r != nil {
 			log.Fatalln(r)
@@ -199,6 +237,6 @@ func main() {
 	// Fetch files for each specified day.
 	nerrors = 0
 	for _, dnum := range os.Args[2:] {
-		fetchDay(cors, spath, year, dnum)
+		fetchDay(client, url, year, dnum)
 	}
 }
