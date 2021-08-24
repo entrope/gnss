@@ -72,15 +72,21 @@ func fetch(client *http.Client, url, localfile, name string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 480*time.Second)
 	req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
 	resp, err = client.Do(req)
-	if err != nil {
+	if err != nil || resp.StatusCode >= 300 {
 		cancel()
 		os.Remove(localfile)
-		if strings.Contains(err.Error(), "550 Failed to open file") {
+		if err == nil {
+			if resp.StatusCode == 404 {
+				failedToOpen = append(failedToOpen, name)
+			} else {
+				report("Unable to GET %s: %s", url, resp.Status)
+			}
+		} else if strings.Contains(err.Error(), "550 Failed to open file") {
 			failedToOpen = append(failedToOpen, name)
 		} else if err.Error() == "i/o timeout" { // an internal/poll.TimeoutError
 			panic(err)
 		} else {
-			report("Unable to RETR %s: %s", url, err.Error())
+			report("Unable to GET %s: %s", url, err.Error())
 		}
 		return false
 	}
