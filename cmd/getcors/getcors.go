@@ -144,6 +144,9 @@ func getNameList(response *http.Response) []string {
 			// ignore
 		} else if idx > 3 && 0 == bytes.Compare(url[0:3], []byte("?C=")) {
 			// ignore
+		} else if idx > 18 && 0 == bytes.Compare(url[idx-11:idx], []byte(".files.list")) {
+			// ignore (yyyy.ddd.files.list)
+			//         0123456789012345678
 		} else if idx > 0 && url[0] == '/' {
 			// ignore
 		} else {
