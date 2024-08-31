@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -70,7 +69,7 @@ func fetch(client *http.Client, url, localfile, name string) bool {
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 480*time.Second)
-	req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, _ = http.NewRequestWithContext(ctx, "GET", url, nil)
 	resp, err = client.Do(req)
 	if err != nil || resp.StatusCode >= 300 {
 		cancel()
@@ -81,7 +80,8 @@ func fetch(client *http.Client, url, localfile, name string) bool {
 			} else {
 				report("Unable to GET %s: %s", url, resp.Status)
 			}
-		} else if strings.Contains(err.Error(), "550 Failed to open file") {
+		} else if strings.Contains(err.Error(), "550 Failed to open file") ||
+			strings.Contains(err.Error(), "TLS handshake timeout") {
 			failedToOpen = append(failedToOpen, name)
 		} else if err.Error() == "i/o timeout" { // an internal/poll.TimeoutError
 			panic(err)
@@ -112,7 +112,7 @@ func getenv(name, defaultValue string) string {
 }
 
 func getNameList(response *http.Response) []string {
-	body, err := ioutil.ReadAll(response.Body)
+	body, err := io.ReadAll(response.Body)
 	if err != nil {
 		report("Unable to ready body for %s: %s",
 			response.Request.URL.String(), err.Error())
@@ -138,13 +138,13 @@ func getNameList(response *http.Response) []string {
 		// Filter urls: allow ????/, or *.gz, ignore sum_gz/ and \?C=* and /*.
 		if idx == 5 && url[4] == '/' { // "abcd/" becomes "abcd"
 			res = append(res, string(url[:4]))
-		} else if idx > 4 && 0 == bytes.Compare(url[idx-3:], []byte(".gz")) { // keep "*.gz"
+		} else if idx > 4 && bytes.Equal(url[idx-3:], []byte(".gz")) { // keep "*.gz"
 			res = append(res, string(url))
-		} else if idx == 7 && 0 == bytes.Compare(url, []byte("sum_gz/")) {
+		} else if idx == 7 && bytes.Equal(url, []byte("sum_gz/")) {
 			// ignore
-		} else if idx > 3 && 0 == bytes.Compare(url[0:3], []byte("?C=")) {
+		} else if idx > 3 && bytes.Equal(url[0:3], []byte("?C=")) {
 			// ignore
-		} else if idx > 18 && 0 == bytes.Compare(url[idx-11:idx], []byte(".files.list")) {
+		} else if idx > 18 && bytes.Equal(url[idx-11:idx], []byte(".files.list")) {
 			// ignore (yyyy.ddd.files.list)
 			//         0123456789012345678
 		} else if idx > 0 && url[0] == '/' {
