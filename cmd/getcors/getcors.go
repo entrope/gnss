@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -18,6 +21,9 @@ var nerrors int
 var failedToOpen = make([]string, 0, 32)
 var fetchedShort = make([]string, 0, 128)
 var fetchedLong = make([]string, 0, 32)
+var procQueue chan struct{}
+var processJob = flag.String("proc", "", "name of processing script")
+var nJobs = flag.Int("j", 1, "maximum number of parallel processing jobs; 0 means runtime.NumCPU()")
 
 func report(format string, a ...interface{}) {
 	log.Printf(format, a...)
@@ -49,6 +55,19 @@ func openLocal(localfile string) *os.File {
 	}
 
 	return out
+}
+
+func runProc(localfile string) {
+	cmd := exec.Command(*processJob, localfile)
+	txt, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Println("Processor failed: ", err)
+		return
+	}
+	t := strings.TrimSpace(string(txt))
+	if t != "" {
+		log.Printf("Processing %s: %s", localfile, t)
+	}
 }
 
 func fetch(client *http.Client, url, localfile, name string) bool {
@@ -99,6 +118,14 @@ func fetch(client *http.Client, url, localfile, name string) bool {
 		report("Failed to GET %s into %s: %s", url, localfile, err.Error())
 		os.Remove(localfile)
 		return false
+	}
+
+	if procQueue != nil {
+		unit := <-procQueue
+		go func() {
+			runProc(localfile)
+			procQueue <- unit
+		}()
 	}
 
 	return true
@@ -215,8 +242,19 @@ func fetchDay(client *http.Client, url, year, dnum string) {
 }
 
 func main() {
-	if len(os.Args) < 3 {
+	flag.Parse()
+	args := flag.Args()
+
+	if len(args) < 2 {
 		log.Fatalf("Usage: %s <year> <dnum> ...", os.Args[0])
+	}
+
+	// Are we supposed to process files once downloaded?
+	if *processJob != "" {
+		jFlag := *nJobs
+		if jFlag == 0 {
+			jFlag = runtime.NumCPU()
+		}
 	}
 
 	// What is the server URL?
@@ -224,12 +262,12 @@ func main() {
 
 	// Sanity-check arguments before we connect.
 	yearRE := regexp.MustCompile("^20[0-9][0-9]$")
-	year := os.Args[1]
+	year := args[0]
 	if yearRE.Find([]byte(year)) == nil {
 		log.Fatalf("Expected year to be 2000-2099, got '%s'", year)
 	}
 	dnumRE := regexp.MustCompile("^[0-3][0-9][0-9]$")
-	for _, dnum := range os.Args[2:] {
+	for _, dnum := range args[1:] {
 		if dnumRE.Find([]byte(dnum)) == nil {
 			log.Fatalf("Expected day number to be 000-365, got '%s'\n", dnum)
 		}
@@ -245,7 +283,7 @@ func main() {
 
 	// Fetch files for each specified day.
 	nerrors = 0
-	for _, dnum := range os.Args[2:] {
+	for _, dnum := range args[1:] {
 		fetchDay(client, url, year, dnum)
 	}
 }
