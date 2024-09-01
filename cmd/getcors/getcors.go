@@ -39,7 +39,7 @@ func openLocal(localfile string) *os.File {
 	}
 
 	if alternate := strings.TrimSuffix(localfile, "o.gz"); alternate != localfile {
-		alternate = alternate + "d.bz2"
+		alternate = alternate + "d.bz3"
 		if finfo, err := os.Stat(alternate); err == nil {
 			if finfo.Size() > 0 {
 				return nil
