@@ -24,6 +24,7 @@ var fetchedLong = make([]string, 0, 32)
 var procQueue chan struct{}
 var processJob = flag.String("proc", "", "name of processing script")
 var nJobs = flag.Int("j", 1, "maximum number of parallel processing jobs; 0 means runtime.NumCPU()")
+var verbose = flag.Int("v", 0, "verbosity level")
 
 func report(format string, a ...interface{}) {
 	log.Printf(format, a...)
@@ -33,18 +34,36 @@ func report(format string, a ...interface{}) {
 	}
 }
 
+// prioritized list of alternate file names
+var alternates = [][2]string{
+	{"o.gz", "d.bz3"},
+	{".gz", ".bz3"},
+}
+
 func openLocal(localfile string) *os.File {
 	if finfo, err := os.Stat(localfile); err == nil && finfo.Size() > 0 {
+		if *verbose > 1 {
+			log.Printf("%s already exists, skipping download", localfile)
+		}
 		return nil
 	}
 
-	if alternate := strings.TrimSuffix(localfile, "o.gz"); alternate != localfile {
-		alternate = alternate + "d.bz3"
-		if finfo, err := os.Stat(alternate); err == nil {
-			if finfo.Size() > 0 {
-				return nil
+	for _, alt := range alternates {
+		if alternate := strings.TrimSuffix(localfile, alt[0]); alternate != localfile {
+			alternate = alternate + alt[1]
+			if finfo, err := os.Stat(alternate); err == nil {
+				if finfo.Size() > 0 {
+					if *verbose > 1 {
+						log.Printf("%s already has local alternate %s", localfile, alternate)
+					}
+					return nil
+				}
+				if *verbose > 0 {
+					log.Printf("Removing local alternate file %s", alternate)
+				}
+				os.Remove(alternate)
 			}
-			os.Remove(alternate)
+			break
 		}
 	}
 
@@ -59,6 +78,9 @@ func openLocal(localfile string) *os.File {
 
 func runProc(localfile string) {
 	cmd := exec.Command(*processJob, localfile)
+	if *verbose > 1 {
+		log.Printf("Running %s %s", *processJob, localfile)
+	}
 	txt, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Println("Processor failed: ", err)
@@ -66,7 +88,7 @@ func runProc(localfile string) {
 	}
 	t := strings.TrimSpace(string(txt))
 	if t != "" {
-		log.Printf("Processing %s: %s", localfile, t)
+		log.Printf("Processed %s: %s", localfile, t)
 	}
 }
 
@@ -85,6 +107,10 @@ func fetch(client *http.Client, url, localfile, name string) bool {
 		}()
 	} else {
 		log.Fatalln("Don't know what to do with fetch of", url)
+	}
+
+	if *verbose > 0 {
+		log.Printf("Fetching %s", localfile)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 480*time.Second)
@@ -254,6 +280,10 @@ func main() {
 		jFlag := *nJobs
 		if jFlag == 0 {
 			jFlag = runtime.NumCPU()
+		}
+		procQueue = make(chan struct{}, jFlag)
+		for i := 0; i < jFlag; i++ {
+			procQueue <- struct{}{}
 		}
 	}
 
