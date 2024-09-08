@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -21,7 +22,6 @@ var nerrors int
 var failedToOpen = make([]string, 0, 32)
 var fetchedShort = make([]string, 0, 128)
 var fetchedLong = make([]string, 0, 32)
-var procQueue chan struct{}
 var processJob = flag.String("proc", "", "name of processing script")
 var nJobs = flag.Int("j", 1, "maximum number of parallel processing jobs; 0 means runtime.NumCPU()")
 var verbose = flag.Int("v", 0, "verbosity level")
@@ -83,7 +83,8 @@ func runProc(localfile string) {
 	}
 	txt, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Println("Processor failed: ", err)
+		log.Printf("Processor failed for %s: %v\n", localfile, err)
+		log.Print(txt)
 		return
 	}
 	t := strings.TrimSpace(string(txt))
@@ -92,7 +93,7 @@ func runProc(localfile string) {
 	}
 }
 
-func fetch(client *http.Client, url, localfile, name string) bool {
+func fetch(client *http.Client, url, localfile, name string, fq chan<- string) bool {
 	var out *os.File
 	var err error
 	var req *http.Request
@@ -146,13 +147,7 @@ func fetch(client *http.Client, url, localfile, name string) bool {
 		return false
 	}
 
-	if procQueue != nil {
-		unit := <-procQueue
-		go func() {
-			runProc(localfile)
-			procQueue <- unit
-		}()
-	}
+	fq <- localfile
 
 	return true
 }
@@ -210,7 +205,7 @@ func getNameList(response *http.Response) []string {
 	return res
 }
 
-func fetchDay(client *http.Client, url, year, dnum string) {
+func fetchDay(client *http.Client, url, year, dnum string, fq chan<- string) {
 	var resp *http.Response
 	var err error
 
@@ -256,11 +251,11 @@ func fetchDay(client *http.Client, url, year, dnum string) {
 	for _, name := range names {
 		if len(name) == 4 {
 			filename := fmt.Sprintf("/%s%s0.%so.gz", name, dnum, year[2:4])
-			if fetch(client, dayURL+name+filename, localdir+filename, name) {
+			if fetch(client, dayURL+name+filename, localdir+filename, name, fq) {
 				fetchedShort = append(fetchedShort, name)
 			}
 		} else {
-			if fetch(client, dayURL+name, localdir+"/"+name, name) {
+			if fetch(client, dayURL+name, localdir+"/"+name, name, fq) {
 				fetchedLong = append(fetchedLong, name)
 			}
 		}
@@ -276,15 +271,21 @@ func main() {
 	}
 
 	// Are we supposed to process files once downloaded?
-	if *processJob != "" {
-		jFlag := *nJobs
-		if jFlag == 0 {
-			jFlag = runtime.NumCPU()
-		}
-		procQueue = make(chan struct{}, jFlag)
-		for i := 0; i < jFlag; i++ {
-			procQueue <- struct{}{}
-		}
+	jFlag := *nJobs
+	if jFlag == 0 {
+		jFlag = runtime.NumCPU()
+	}
+
+	procDone := sync.WaitGroup{}
+	procDone.Add(jFlag)
+	procQueue := make(chan string, 8)
+	for i := 0; i < jFlag; i++ {
+		go func() {
+			defer procDone.Done()
+			for file := range procQueue {
+				runProc(file)
+			}
+		}()
 	}
 
 	// What is the server URL?
@@ -314,6 +315,10 @@ func main() {
 	// Fetch files for each specified day.
 	nerrors = 0
 	for _, dnum := range args[1:] {
-		fetchDay(client, url, year, dnum)
+		fetchDay(client, url, year, dnum, procQueue)
 	}
+
+	// If we launched background jobs, make sure they finished.
+	close(procQueue)
+	procDone.Wait()
 }
