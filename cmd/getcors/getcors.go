@@ -84,7 +84,7 @@ func runProc(localfile string) {
 	txt, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Printf("Processor failed for %s: %v\n", localfile, err)
-		log.Print(txt)
+		log.Print(string(txt))
 		return
 	}
 	t := strings.TrimSpace(string(txt))
